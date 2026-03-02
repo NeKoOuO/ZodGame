@@ -1,4 +1,4 @@
-import requests
+from curl_cffi import requests
 import os
 import re
 import time
@@ -18,20 +18,15 @@ BASE_URL = 'https://zodgame.xyz/'
 SIGN_URL = urljoin(BASE_URL, 'plugin.php?id=dsu_paulsign:sign')
 
 # 重試設定
-MAX_RETRIES = 3  # 最大重試次數
-RETRY_DELAY = 10  # 重試間隔（秒）
+MAX_RETRIES = 3
+RETRY_DELAY = 10
 
-# 必要的 cookie 名稱
+# 必要的 cookie 名稱（只保留這四個，cf_clearance 不帶）
 ESSENTIAL_COOKIES = [
     'qhMq_2132_saltkey',
     'qhMq_2132_auth',
     'qhMq_2132_lastvisit',
     'qhMq_2132_ulastactivity'
-]
-
-# 明確排除的 cookie（IP 綁定，在 GitHub Actions 環境無效）
-EXCLUDED_COOKIES = [
-    'cf_clearance',
 ]
 
 def parse_cookies(cookie_str):
@@ -65,14 +60,23 @@ def extract_reward(response_text):
     match = re.search(r'获得随机奖励\s*酱油\s*(\d+)\s*瓶', response_text)
     return match.group(1) if match else None
 
-def sign_with_retry(session, max_retries=MAX_RETRIES, retry_delay=RETRY_DELAY):
-    """帶有重試機制的簽到函數"""
+def sign_with_retry(cookies, max_retries=MAX_RETRIES, retry_delay=RETRY_DELAY):
+    """帶有重試機制的簽到函數（使用 curl_cffi 模擬 Chrome TLS）"""
     for attempt in range(max_retries):
         try:
+            # 用 curl_cffi 模擬 Chrome120 的 TLS fingerprint，繞過 Cloudflare
+            session = requests.Session(impersonate="chrome120")
+            session.cookies.update(cookies)
+            session.headers.update({
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+                'Referer': SIGN_URL
+            })
+
             # 訪問簽到頁面
             response = session.get(SIGN_URL, timeout=30)
             response.raise_for_status()
-            
+
             # 檢查簽到狀態
             status = check_sign_status(response.text)
             if status == 'already_signed':
@@ -81,27 +85,26 @@ def sign_with_retry(session, max_retries=MAX_RETRIES, retry_delay=RETRY_DELAY):
             elif status == 'not_logged_in':
                 logger.error("Cookie 已過期或無效，請更新 ZODGAME_COOKIE")
                 return False
-            
+
             # 獲取簽到表單數據
             formhash = extract_formhash(response.text)
             if not formhash:
                 logger.error("無法獲取 formhash，可能未正確登入")
                 return False
-                
+
             # 執行簽到
             sign_data = {
                 'formhash': formhash,
-                'qdxq': 'kx',  # 心情：開心
-                'qdmode': '1',  # 簽到模式
-                'todaysay': '每日簽到',  # 簽到留言
+                'qdxq': 'kx',
+                'qdmode': '1',
+                'todaysay': '每日簽到',
                 'fastreply': '0'
             }
-            
+
             sign_url = f"{SIGN_URL}&operation=qiandao&infloat=1&inajax=1"
             sign_response = session.post(sign_url, data=sign_data, timeout=30)
             sign_response.raise_for_status()
-            
-            # 檢查回應內容中是否包含成功訊息
+
             if "恭喜你签到成功" in sign_response.text or "簽到成功" in sign_response.text:
                 reward = extract_reward(sign_response.text)
                 if reward:
@@ -114,44 +117,28 @@ def sign_with_retry(session, max_retries=MAX_RETRIES, retry_delay=RETRY_DELAY):
                 return True
             else:
                 logger.warning(f"簽到回應不符合預期：{sign_response.text[:200]}...")
-                
-        except requests.RequestException as e:
-            logger.error(f"第 {attempt + 1} 次嘗試失敗：{str(e)}")
+
         except Exception as e:
-            logger.error(f"第 {attempt + 1} 次嘗試發生錯誤：{str(e)}")
-        
-        # 最後一次不用等
+            logger.error(f"第 {attempt + 1} 次嘗試失敗：{str(e)}")
+
         if attempt < max_retries - 1:
             logger.info(f"等待 {retry_delay} 秒後重試...")
             time.sleep(retry_delay)
-    
+
     logger.error(f"已重試 {max_retries} 次，簽到失敗")
     return False
 
 def main():
     try:
-        # 從環境變數獲取 cookie
         cookie_str = os.environ.get('ZODGAME_COOKIE')
         if not cookie_str:
             logger.error("請設定 ZODGAME_COOKIE 環境變數")
             exit(1)
-        
-        # 建立 session 並設定 cookie
-        session = requests.Session()
-        session.cookies.update(parse_cookies(cookie_str))
-        
-        # 設定請求標頭
-        session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'Origin': BASE_URL.rstrip('/'),
-            'Referer': SIGN_URL
-        })
-        
-        # 執行簽到
-        if sign_with_retry(session):
+
+        cookies = parse_cookies(cookie_str)
+        logger.info(f"已載入 {len(cookies)} 個 cookie")
+
+        if sign_with_retry(cookies):
             logger.info("簽到操作完成")
             exit(0)
         else:
