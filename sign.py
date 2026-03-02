@@ -20,6 +20,8 @@ SIGN_URL = urljoin(BASE_URL, 'plugin.php?id=dsu_paulsign:sign')
 # 重試設定
 MAX_RETRIES = 3
 RETRY_DELAY = 10
+MAX_ROUNDS = 2        # 最多幾輪（每輪 MAX_RETRIES 次）
+LONG_RETRY_DELAY = 3600  # 輪次之間的等待（秒）
 
 # 必要的 cookie 名稱（只保留這四個，cf_clearance 不帶）
 ESSENTIAL_COOKIES = [
@@ -61,71 +63,71 @@ def extract_reward(response_text):
     return match.group(1) if match else None
 
 def sign_with_retry(cookies, max_retries=MAX_RETRIES, retry_delay=RETRY_DELAY):
-    """帶有重試機制的簽到函數（使用 curl_cffi 模擬 Chrome TLS）"""
-    for attempt in range(max_retries):
-        try:
-            # 用 curl_cffi 模擬 Chrome120 的 TLS fingerprint，繞過 Cloudflare
-            session = requests.Session(impersonate="chrome120")
-            session.cookies.update(cookies)
-            session.headers.update({
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
-                'Referer': SIGN_URL
-            })
+    """帶有重試機制的簽到函數（多輪重試，輪次間長等待）"""
+    for round_num in range(MAX_ROUNDS):
+        if round_num > 0:
+            logger.info(f"等待 {LONG_RETRY_DELAY} 秒後開始第 {round_num + 1} 輪重試...")
+            time.sleep(LONG_RETRY_DELAY)
 
-            # 訪問簽到頁面
-            response = session.get(SIGN_URL, timeout=30)
-            response.raise_for_status()
+        for attempt in range(max_retries):
+            try:
+                session = requests.Session(impersonate="chrome120")
+                session.cookies.update(cookies)
+                session.headers.update({
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                    'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+                    'Referer': SIGN_URL
+                })
 
-            # 檢查簽到狀態
-            status = check_sign_status(response.text)
-            if status == 'already_signed':
-                logger.info("今天已經簽到過了")
-                return True
-            elif status == 'not_logged_in':
-                logger.error("Cookie 已過期或無效，請更新 ZODGAME_COOKIE")
-                return False
+                response = session.get(SIGN_URL, timeout=30)
+                response.raise_for_status()
 
-            # 獲取簽到表單數據
-            formhash = extract_formhash(response.text)
-            if not formhash:
-                logger.error("無法獲取 formhash，可能未正確登入")
-                return False
+                status = check_sign_status(response.text)
+                if status == 'already_signed':
+                    logger.info("今天已經簽到過了")
+                    return True
+                elif status == 'not_logged_in':
+                    logger.error("Cookie 已過期或無效，請更新 ZODGAME_COOKIE")
+                    return False
 
-            # 執行簽到
-            sign_data = {
-                'formhash': formhash,
-                'qdxq': 'kx',
-                'qdmode': '1',
-                'todaysay': '每日簽到',
-                'fastreply': '0'
-            }
+                formhash = extract_formhash(response.text)
+                if not formhash:
+                    logger.error("無法獲取 formhash，可能未正確登入")
+                    return False
 
-            sign_url = f"{SIGN_URL}&operation=qiandao&infloat=1&inajax=1"
-            sign_response = session.post(sign_url, data=sign_data, timeout=30)
-            sign_response.raise_for_status()
+                sign_data = {
+                    'formhash': formhash,
+                    'qdxq': 'kx',
+                    'qdmode': '1',
+                    'todaysay': '每日簽到',
+                    'fastreply': '0'
+                }
 
-            if "恭喜你签到成功" in sign_response.text or "簽到成功" in sign_response.text:
-                reward = extract_reward(sign_response.text)
-                if reward:
-                    logger.info(f"簽到成功！獲得酱油 {reward} 瓶")
+                sign_url = f"{SIGN_URL}&operation=qiandao&infloat=1&inajax=1"
+                sign_response = session.post(sign_url, data=sign_data, timeout=30)
+                sign_response.raise_for_status()
+
+                if "恭喜你签到成功" in sign_response.text or "簽到成功" in sign_response.text:
+                    reward = extract_reward(sign_response.text)
+                    if reward:
+                        logger.info(f"簽到成功！獲得酱油 {reward} 瓶")
+                    else:
+                        logger.info("簽到成功！")
+                    return True
+                elif "已經簽到" in sign_response.text or "已经签到" in sign_response.text:
+                    logger.info("今天已經簽到過了")
+                    return True
                 else:
-                    logger.info("簽到成功！")
-                return True
-            elif "已經簽到" in sign_response.text or "已经签到" in sign_response.text:
-                logger.info("今天已經簽到過了")
-                return True
-            else:
-                logger.warning(f"簽到回應不符合預期：{sign_response.text[:200]}...")
+                    logger.warning(f"簽到回應不符合預期：{sign_response.text[:200]}...")
 
-        except Exception as e:
-            logger.error(f"第 {attempt + 1} 次嘗試失敗：{str(e)}")
+            except Exception as e:
+                logger.error(f"第 {round_num + 1} 輪第 {attempt + 1} 次嘗試失敗：{str(e)}")
 
-        if attempt < max_retries - 1:
-            logger.info(f"等待 {retry_delay} 秒後重試...")
-            time.sleep(retry_delay)
+            if attempt < max_retries - 1:
+                logger.info(f"等待 {retry_delay} 秒後重試...")
+                time.sleep(retry_delay)
 
-    logger.error(f"已重試 {max_retries} 次，簽到失敗")
+    logger.error(f"已重試 {MAX_ROUNDS} 輪，簽到失敗")
     return False
 
 def main():
