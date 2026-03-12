@@ -18,7 +18,7 @@ BASE_URL = 'https://zodgame.xyz/'
 SIGN_URL = urljoin(BASE_URL, 'plugin.php?id=dsu_paulsign:sign')
 
 # 重試設定
-MAX_RETRIES = 3
+MAX_RETRIES = 4
 RETRY_DELAY = 10
 MAX_ROUNDS = 3        # 最多幾輪（每輪 MAX_RETRIES 次）
 LONG_RETRY_DELAY = 3600  # 輪次之間的等待（秒）
